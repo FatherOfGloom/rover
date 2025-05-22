@@ -1,3 +1,4 @@
 fn main() {
-    rover::run();
+    // TODO: print to stderr
+    rover::run().unwrap();
 }
