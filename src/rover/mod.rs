@@ -1,30 +1,59 @@
+use core::fmt;
 use std::fs::{self, DirEntry};
 use std::io::{self, Stdout, Write, stdout};
-use std::path::Path;
-use std::thread;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::{thread, usize};
 
 use crossterm::cursor::MoveTo;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::terminal::Clear;
 use crossterm::{QueueableCommand, terminal};
 
+#[derive(Default, Clone, Copy)]
+pub struct Rect {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+impl Rect {
+    pub fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
+        Rect {
+            x: x,
+            y: y,
+            w: w,
+            h: h,
+        }
+    }
+
+    pub fn resize(&mut self, w: usize, h: usize) {
+        self.w = w;
+        self.h = h;
+    }
+}
+
 #[derive(Default)]
 pub struct Rover {
+    current_path: PathBuf,
     entries: Option<Vec<DirEntry>>,
     should_exit: bool,
     pivot: usize,
+    mode: RoverMode,
+    console_screen: Rect,
 }
 
 impl Rover {
     pub fn new(path: &Path) -> Result<Self, String> {
-        terminal::enable_raw_mode()
-            .map_err(|e| format!("Couldn't enable raw mode: {}", e.to_string()))?;
 
         Self::flush_console(&mut stdout()).unwrap();
+        let (w, h) = terminal::size().unwrap();
 
         Ok(Rover {
             entries: Some(Self::read_dir(path)?),
+            current_path: path.to_path_buf(),
+            console_screen: Rect::new(0, 0, w as usize, h as usize),
             ..Default::default()
         })
     }
@@ -52,16 +81,26 @@ impl Rover {
         stdout.queue(Clear(terminal::ClearType::All))?;
         stdout.queue(MoveTo(0, 0))?;
 
+        stdout.write(format!("DIR: {}", self.current_path.display()).as_bytes())?;
+        stdout.queue(MoveTo(0, 1))?;
+
         for (i, e) in entries.iter().enumerate() {
             let prefix = if i == self.pivot { ">" } else { " " };
-            let dir_entry_path = format!("\t{} {}", prefix, e.path().display());
-            stdout.queue(MoveTo(0, i as u16))?;
+            let dir_entry_path = format!("{} {}", prefix, e.path().display());
+            stdout.queue(MoveTo(0, i as u16 + 3))?;
             stdout.write(dir_entry_path.as_bytes())?;
         }
 
+        stdout.queue(MoveTo(
+            (self.console_screen.w - 10) as u16,
+            (self.console_screen.h) as u16,
+        ))?;
+
+        stdout.write(self.mode.to_string().as_bytes())?;
+
         stdout.flush()?;
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(33));
 
         Ok(())
     }
@@ -76,8 +115,11 @@ impl Rover {
                 match event.code {
                     KeyCode::Char(c) => {
                         if event.modifiers.contains(KeyModifiers::CONTROL) {
-                            if c == 'c' {
-                                self.should_exit = true;
+                            match c {
+                                'q' => self.should_exit = true,
+                                'c' => self.mode = RoverMode::COMMAND,
+                                'f' => self.mode = RoverMode::FLOW,
+                                _ => {}
                             }
                         } else {
                             match c.to_lowercase().next().unwrap() {
@@ -89,8 +131,19 @@ impl Rover {
                     }
                     KeyCode::Up => self.shift(RoverDirection::UP),
                     KeyCode::Down => self.shift(RoverDirection::DOWN),
+                    KeyCode::Enter => {
+                        let selected_path = self.entries.as_ref().unwrap().get(self.pivot).unwrap().path();
+                        if selected_path.is_dir() {
+                            self.entries = Some(Self::read_dir(&selected_path).unwrap());
+                            self.current_path = selected_path;
+                            self.pivot = 0;
+                        }
+                    }
                     _ => {}
                 }
+            }
+            Event::Resize(new_w, new_h) => {
+                self.console_screen.resize(new_w as usize, new_h as usize);
             }
             _ => {}
         }
@@ -101,7 +154,7 @@ impl Rover {
         match d {
             RoverDirection::UP => {
                 if self.pivot as i64 - 1 < 0 {
-                    self.pivot = self.len()
+                    self.pivot = self.len() - 1;
                 } else {
                     self.pivot -= 1;
                 }
@@ -139,14 +192,25 @@ impl Rover {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RoverMode {
+    FLOW,
+    COMMAND,
+}
+
+impl fmt::Display for RoverMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt::Debug::fmt(self, f)
+    }
+}
+
+impl Default for RoverMode {
+    fn default() -> Self {
+        RoverMode::FLOW
+    }
+}
+
 enum RoverDirection {
     UP,
     DOWN,
-}
-
-impl Drop for Rover {
-    fn drop(&mut self) {
-        let _ = terminal::disable_raw_mode()
-            .map_err(|e| eprintln!("Error: Couldn't disable raw mode: {}", e.to_string()));
-    }
 }

@@ -1,4 +1,7 @@
+use crossterm::terminal;
+
 fn main() {
-    // TODO: print to stderr
+    terminal::enable_raw_mode().unwrap();
     rover::run().unwrap();
+    terminal::disable_raw_mode().unwrap();
 }
