@@ -1,13 +1,12 @@
 use std::fs::{self, DirEntry};
 use std::io::{self, Stdout, Write, stdout};
-use std::ops::Add;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
 use crossterm::cursor::MoveTo;
-use crossterm::event::{Event, KeyCode, KeyModifiers, read};
-use crossterm::terminal::{Clear, EnterAlternateScreen};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::terminal::Clear;
 use crossterm::{QueueableCommand, terminal};
 
 #[derive(Default)]
@@ -42,20 +41,25 @@ impl Rover {
         Ok(())
     }
 
-    pub fn draw_console(&self) -> io::Result<()> {
+    pub fn draw_entries(&self) -> io::Result<()> {
         let entries = self
             .entries
             .as_ref()
             .expect("draw_console() called before initializing entry list");
 
+        let mut stdout = stdout();
+
+        stdout.queue(Clear(terminal::ClearType::All))?;
+        stdout.queue(MoveTo(0, 0))?;
 
         for (i, e) in entries.iter().enumerate() {
-            println!(
-                "\t{} {}",
-                if i == self.pivot { ">" } else { " " },
-                e.path().display()
-            );
+            let prefix = if i == self.pivot { ">" } else { " " };
+            let dir_entry_path = format!("\t{} {}", prefix, e.path().display());
+            stdout.queue(MoveTo(0, i as u16))?;
+            stdout.write(dir_entry_path.as_bytes())?;
         }
+
+        stdout.flush()?;
 
         thread::sleep(Duration::from_millis(50));
 
@@ -64,24 +68,30 @@ impl Rover {
 
     fn read_console_input(&mut self) -> std::io::Result<()> {
         match read().unwrap() {
-            Event::Key(event) => match event.code {
-                KeyCode::Char(c) => {
-                    if event.modifiers.contains(KeyModifiers::CONTROL) {
-                        if c == 'c' {
-                            self.should_exit = true;
-                        }
-                    } else {
-                        match c.to_lowercase().next().unwrap() {
-                            'j' => self.shift(RoverDirection::DOWN),
-                            'k' => self.shift(RoverDirection::UP),
-                            _ => {}
+            Event::Key(event) => {
+                if event.kind != KeyEventKind::Press {
+                    return Ok(());
+                }
+
+                match event.code {
+                    KeyCode::Char(c) => {
+                        if event.modifiers.contains(KeyModifiers::CONTROL) {
+                            if c == 'c' {
+                                self.should_exit = true;
+                            }
+                        } else {
+                            match c.to_lowercase().next().unwrap() {
+                                'j' => self.shift(RoverDirection::DOWN),
+                                'k' => self.shift(RoverDirection::UP),
+                                _ => {}
+                            }
                         }
                     }
+                    KeyCode::Up => self.shift(RoverDirection::UP),
+                    KeyCode::Down => self.shift(RoverDirection::DOWN),
+                    _ => {}
                 }
-                KeyCode::Up => self.shift(RoverDirection::UP),
-                KeyCode::Down => self.shift(RoverDirection::DOWN),
-                _ => {}
-            },
+            }
             _ => {}
         }
         Ok(())

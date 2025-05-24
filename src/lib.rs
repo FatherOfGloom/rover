@@ -1,6 +1,6 @@
 use rover::Rover;
 
-use std::{env, io::stdout};
+use std::env;
 
 pub mod rover;
 
@@ -12,8 +12,7 @@ pub fn run() -> Result<(), String> {
     let mut r = Rover::new(&path).unwrap();
 
     while !r.should_exit() {
-        Rover::flush_console(&mut stdout()).unwrap();
-        r.draw_console().unwrap();
+        r.draw_entries().unwrap();
         r.update().unwrap();
     }
 
