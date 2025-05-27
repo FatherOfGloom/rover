@@ -20,12 +20,7 @@ pub struct Rect {
 
 impl Rect {
     pub fn new(x: usize, y: usize, w: usize, h: usize) -> Self {
-        Rect {
-            x: x,
-            y: y,
-            w: w,
-            h: h,
-        }
+        Rect { x, y, w, h }
     }
 
     pub fn resize(&mut self, w: usize, h: usize) {
