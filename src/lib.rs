@@ -12,7 +12,7 @@ pub fn run() -> Result<(), String> {
     let mut r = Rover::new(&path).unwrap();
 
     while !r.should_exit() {
-        r.draw_entries().unwrap();
+        r.render().unwrap();
         r.update().unwrap();
     }
 

@@ -2,8 +2,7 @@ use core::fmt;
 use std::fs::{self, DirEntry};
 use std::io::{self, Stdout, Write, stdout};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use std::{thread, usize};
+use std::{usize};
 
 use crossterm::cursor::MoveTo;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
@@ -37,6 +36,8 @@ pub struct Rover {
     pivot: usize,
     mode: RoverMode,
     console_screen: Rect,
+    flow_direction: RoverDirection,
+    undo_path: Option<Vec<usize>>
 }
 
 impl Rover {
@@ -69,7 +70,31 @@ impl Rover {
         self.current_path.as_ref().unwrap()
     }
 
-    pub fn draw_entries(&self) -> io::Result<()> {
+    fn draw_entries(&self, stdout: &mut impl Write, entries: &[DirEntry], rect: Rect) -> io::Result<()> {
+        let entries: &[DirEntry] = match self.flow_direction {
+            RoverDirection::Down | RoverDirection::None  | RoverDirection::Up => {
+                if self.pivot + 1 > rect.h {
+                    &entries[self.pivot - rect.h + 1..self.pivot + 1]
+                } else {
+                    entries
+                }
+            }, 
+        };
+
+        for (i, e) in entries.iter().enumerate() {
+            if i + rect.y + 1 > self.console_screen.h {
+                break;
+            }
+
+            let prefix = if i == std::cmp::min(rect.h - 1, self.pivot) { ">" } else { " " };
+            let dir_entry_path = format!("{} {}", prefix, e.file_name().to_str().unwrap());
+            stdout.queue(MoveTo(rect.x as u16, i as u16 + rect.y as u16))?;
+            stdout.write(dir_entry_path.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    pub fn render(&self) -> io::Result<()> {
         let entries = self
             .entries
             .as_ref()
@@ -91,16 +116,9 @@ impl Rover {
 
         stdout.write(mode_label.as_bytes())?;
 
-        for (i, e) in entries.iter().enumerate() {
-            let prefix = if i == self.pivot { ">" } else { " " };
-            let dir_entry_path = format!("{} {}", prefix, e.file_name().to_str().unwrap());
-            stdout.queue(MoveTo(0, i as u16 + 3))?;
-            stdout.write(dir_entry_path.as_bytes())?;
-        }
+        self.draw_entries(&mut stdout, &entries, Rect { x: 1, y: 2, w: self.console_screen.w - 1, h: self.console_screen.h - 2})?;
 
         stdout.flush()?;
-
-        thread::sleep(Duration::from_millis(33));
 
         Ok(())
     }
@@ -117,21 +135,21 @@ impl Rover {
                         if event.modifiers.contains(KeyModifiers::CONTROL) {
                             match c {
                                 'q' => self.should_exit = true,
-                                'c' => self.mode = RoverMode::COMMAND,
-                                'f' => self.mode = RoverMode::FLOW,
+                                'c' => self.mode = RoverMode::Command,
+                                'f' => self.mode = RoverMode::Flow,
                                 'k' => self.execute_entry()?,
                                 _ => {}
                             }
                         } else {
                             match c.to_lowercase().next().unwrap() {
-                                'j' => self.shift(RoverDirection::DOWN),
-                                'k' => self.shift(RoverDirection::UP),
+                                'j' => self.shift(RoverDirection::Down),
+                                'k' => self.shift(RoverDirection::Up),
                                 _ => {}
                             }
                         }
                     }
-                    KeyCode::Up => self.shift(RoverDirection::UP),
-                    KeyCode::Down => self.shift(RoverDirection::DOWN),
+                    KeyCode::Up => self.shift(RoverDirection::Up),
+                    KeyCode::Down => self.shift(RoverDirection::Down),
                     KeyCode::Enter => self.execute_entry()?,
                     KeyCode::Esc => self.to_parent_entry()?,
                     _ => {}
@@ -153,7 +171,9 @@ impl Rover {
         let selected_path = self.entries_ref().get(self.pivot).unwrap().path();
 
         if selected_path.is_dir() {
+            let prev_pivot = self.pivot;
             self.goto(&selected_path)?;
+            self.push_undo_pivot(prev_pivot);
         } else {
             opener::open(selected_path.display().to_string())
                 .map_err(|e| format!("Error opening the file '{}': {}", selected_path.display(), e))?;
@@ -177,8 +197,23 @@ impl Rover {
         };
 
         self.goto(parent_entry).map_err(|e| { self.current_path = Some(current_path); e })?;
+        self.pivot = self.pop_undo_pivot();
 
         Ok(())
+    }
+
+    fn push_undo_pivot(&mut self, idx: usize) {
+        match self.undo_path.as_mut() {
+            Some(v) => v.push(idx),
+            None => self.undo_path = Some(vec![idx]),
+        }
+    }
+
+    fn pop_undo_pivot(&mut self) -> usize {
+        match self.undo_path.as_mut() {
+            Some(v) => v.pop().unwrap_or(0),
+            _ => 0,
+        }
     }
 
     fn goto(&mut self, selected_path: &Path) -> Result<(), String> {
@@ -195,18 +230,21 @@ impl Rover {
 
     fn shift(&mut self, d: RoverDirection) {
         match d {
-            RoverDirection::UP => {
+            RoverDirection::Up => {
                 if self.pivot as i64 - 1 < 0 {
                     self.pivot = self.len() - 1;
                 } else {
                     self.pivot -= 1;
                 }
             }
-            RoverDirection::DOWN => {
+            RoverDirection::Down => {
                 self.pivot += 1;
                 self.pivot %= self.len()
             }
+            _ => panic!("Cannot shift() to uncertain direction.")
         };
+
+        self.flow_direction = d;
     }
 
     pub fn len(&self) -> usize {
@@ -235,10 +273,11 @@ impl Rover {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Default, Debug)]
 enum RoverMode {
-    FLOW,
-    COMMAND,
+    #[default]
+    Flow,
+    Command,
 }
 
 impl fmt::Display for RoverMode {
@@ -247,13 +286,10 @@ impl fmt::Display for RoverMode {
     }
 }
 
-impl Default for RoverMode {
-    fn default() -> Self {
-        RoverMode::FLOW
-    }
-}
-
+#[derive(Default)]
 enum RoverDirection {
-    UP,
-    DOWN,
+    #[default]
+    None,
+    Up,
+    Down,
 }
