@@ -1,4 +1,4 @@
-use std::env;
+use std::{env, io::stdout};
 
 use crate::rover::DirScraper;
 
@@ -9,13 +9,11 @@ pub fn run() -> Result<(), String> {
 
     let path = env::current_dir().map_err(|e| format!("Error: {}", e.to_string()))?;
 
-    // let mut r = Rover::new(&path).unwrap();
+    let mut stdout = stdout().lock();
     let mut ds = DirScraper::init(path);
 
-    while !ds.should_exit() {
-        ds.render();
-        // ds.update().unwrap();
-    }
+    ds.run(&mut stdout)
+        .map_err(|e| format!("Error: {}", e.to_string()))?;
 
     Ok(())
 }

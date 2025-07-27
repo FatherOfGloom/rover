@@ -1,7 +1,7 @@
 use crossterm::terminal;
 
 fn main() {
-    terminal::enable_raw_mode().unwrap();
+    // println!("{}", (0..-1).contains(&0));
+    // return;
     rover::run().unwrap();
-    terminal::disable_raw_mode().unwrap();
 }
