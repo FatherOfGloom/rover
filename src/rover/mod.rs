@@ -1,5 +1,6 @@
 use core::fmt;
 use std::cell::RefCell;
+use std::cmp::min;
 use std::fs::{self, DirEntry};
 use std::io::{self, Stdout, StdoutLock, Write, stdout};
 use std::ops::Deref;
@@ -7,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::usize;
 
-use crossterm::cursor::{self, MoveTo};
+use crossterm::cursor::{self, MoveTo, MoveToNextLine};
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers, read,
 };
@@ -39,9 +40,9 @@ impl Rect {
     }
 }
 
-impl Component for DirEntry {
+impl Component for (bool, DirEntry) {
     fn render(&self, out: &mut impl Write) {
-        out.write(self.file_name().to_str().unwrap().as_bytes())
+        out.write(self.1.file_name().to_str().unwrap().as_bytes())
             .unwrap();
     }
 }
@@ -61,7 +62,10 @@ impl DirScraper {
 
         let mut rover = Rover::new(dimens.h);
 
-        let entries = Self::read_dir(&path).unwrap().into_iter().map(|e| ListEntry::from_dir_entry(e));
+        let entries = Self::read_dir(&path)
+            .unwrap()
+            .into_iter()
+            .map(|e| ListEntry::from_dir_entry(e));
         rover.reset(entries.collect());
         rover.set_selected(0);
 
@@ -75,7 +79,6 @@ impl DirScraper {
     }
 
     pub fn run(&mut self, stdout: &mut StdoutLock) -> std::io::Result<()> {
-
         stdout
             .queue(EnterAlternateScreen)?
             .queue(cursor::Hide)?
@@ -120,15 +123,15 @@ impl DirScraper {
                 _ => {}
             }
 
-            if let Some(selected) = self.rover.selected_mut() {
-                selected.is_selected = true;
-            }
+            // if let Some(selected) = self.rover.selected_mut() {
+            //     selected.is_selected = true;
+            // }
 
             self.rover.render(&mut renderer);
 
-            if let Some(selected) = self.rover.selected_mut() {
-                selected.is_selected = false;
-            }
+            // if let Some(selected) = self.rover.selected_mut() {
+            //     selected.is_selected = false;
+            // }
 
             if self.should_exit {
                 break;
@@ -212,7 +215,10 @@ impl DirScraper {
             ));
         }
 
-        let entries = Self::read_dir(&selected_path).unwrap().into_iter().map(|e| ListEntry::from_dir_entry(e));
+        let entries = Self::read_dir(&selected_path)
+            .unwrap()
+            .into_iter()
+            .map(|e| ListEntry::from_dir_entry(e));
         self.current_path = Some(selected_path.to_path_buf());
         // self.pivot = 0;
 
@@ -255,14 +261,14 @@ trait Component {
 
 struct ListEntry {
     dir_entry: DirEntry,
-    pub is_selected: bool,
+    // pub is_selected: bool,
 }
 
 impl ListEntry {
     fn from_dir_entry(dir_entry: DirEntry) -> Self {
         Self {
             dir_entry,
-            is_selected: false,
+            // is_selected: false,
         }
     }
 }
@@ -277,47 +283,133 @@ impl Deref for ListEntry {
 
 impl Component for ListEntry {
     fn render(&self, w: &mut impl Write) {
-        let prefix = if self.is_selected { ">\t" } else { "\t" };
-        let target = format!("{}{}", prefix,self.dir_entry.file_name().to_str().unwrap());
-        w.write(target.as_bytes()).unwrap();
+        // let prefix = if self.is_selected { ">\t" } else { "\t" };
+        // let target = format!("{}{}", prefix, self.dir_entry.file_name().to_str().unwrap());
+        // w.write(target.as_bytes()).unwrap();
+        let binding = self.dir_entry.file_name();
+        let target = binding.to_str().unwrap().as_bytes();
+        w.write(target).unwrap();
     }
 }
 
 struct ListRenderer<'a, 'lock> {
     // TODO: wrap stdout with something that implements Write
-    stdout: &'a mut StdoutLock<'lock>,
+    // stdout: &'a mut StdoutLock<'lock>,
+    writer: ListWriter<'a, 'lock>,
     bounds: Rect,
 }
 
 impl<'a, 'lock> ListRenderer<'a, 'lock> {
     fn new(bounds: Rect, stdout: &'a mut StdoutLock<'lock>) -> Self {
-        Self { stdout, bounds }
+        Self { bounds, writer: ListWriter::new(stdout, bounds.w) }
     }
 
     fn resize(&mut self, w: usize, h: usize) {
         self.bounds.resize(w, h);
+    }
+
+    fn stdout(&mut self) -> &mut StdoutLock<'lock> {
+        self.writer.lock()
+    }
+}
+
+struct ListWriter<'a, 'lock> {
+    lock: &'a mut StdoutLock<'lock>,
+    is_selected: bool,
+    line: usize,
+    max_len: usize,
+}
+
+impl<'a, 'lock> ListWriter<'a, 'lock> {
+    fn new(lock: &'a mut StdoutLock<'lock>, max_len: usize) -> Self {
+        Self {
+            lock,
+            max_len,
+            is_selected: false, 
+            line: 0,
+        }
+    }
+
+    fn next_line(&mut self) {
+        self.lock
+            .queue(Clear(ClearType::UntilNewLine))
+            .unwrap()
+            .queue(MoveToNextLine(1))
+            .unwrap();
+        
+        self.line += 1;
+    }
+
+    fn lock(&mut self) -> &mut StdoutLock<'lock> {
+        self.lock
+    }
+
+    fn is_selected(&self) -> bool {
+        self.is_selected
+    }
+
+    fn set_selection(&mut self, selection: bool) {
+        self.is_selected = selection;
+    }
+
+    fn unselect(&mut self) {
+        self.is_selected = false;
+    }
+}
+
+impl Write for ListWriter<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let prefix = if self.is_selected() { b"> " } else { b"  " };
+        let mut target = prefix.to_vec();
+        target.extend_from_slice(buf);
+        let res = self.lock.write(&target[..min(target.len(), self.max_len)]);
+        self.next_line();
+        res
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.lock.flush()
+    }
+}
+
+struct SelectionGuard<'a, 'lock>(&'a mut ListWriter<'a, 'lock>); 
+
+impl<'a, 'lock> Deref for SelectionGuard<'a, 'lock> {
+    type Target = ListWriter<'a, 'lock>;
+
+    fn deref(&self) -> &Self::Target {
+        self.0
+    }
+}
+
+impl Drop for SelectionGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.0.unselect();
     }
 }
 
 impl Renderer for ListRenderer<'_, '_> {
     fn render<'a, I, T>(&mut self, components: I)
     where
-        I: Iterator<Item = &'a T>,
+        I: Iterator<Item = (bool, &'a T)>,
         T: Component + 'a,
     {
-       self.stdout.queue(Clear(ClearType::All)).unwrap();
-        self.stdout
+        self.stdout().queue(Clear(ClearType::All)).unwrap();
+        self.stdout()
             .queue(BeginSynchronizedUpdate)
             .unwrap()
             .queue(MoveTo(0, 0))
             .unwrap();
 
-        for (i, c) in components.enumerate() {
-            c.render(self.stdout);
-            self.stdout.queue(MoveTo(0, i.try_into().unwrap())).unwrap();
+        for (selected, c) in components {
+            self.writer.set_selection(selected);
+
+            c.render(&mut self.writer);
+
+            self.writer.unselect();
         }
 
-        self.stdout
+        self.stdout()
             .queue(EndSynchronizedUpdate)
             .unwrap()
             .flush()
@@ -328,10 +420,11 @@ impl Renderer for ListRenderer<'_, '_> {
 trait Renderer {
     fn render<'a, I, T>(&mut self, components: I)
     where
-        I: Iterator<Item = &'a T>,
+        I: Iterator<Item = (bool, &'a T)>,
         T: Component + 'a;
 }
 
+// struct Rover<'a, C, R>
 struct Rover<C>
 where
     C: Component,
@@ -339,11 +432,13 @@ where
 {
     components: Option<Vec<C>>,
     ctx: Context,
-    // renderer: Option<R>,
+    // r: Option<&'a mut R>,
 }
 
 // impl<C: Component, R: Renderer> Rover<C, R> {
 impl<C: Component> Rover<C> {
+// impl<'a, C: Component, R: Renderer> Rover<'a, C, R> {
+    // pub fn new(height: usize, r: &'a mut R) -> Self {
     pub fn new(height: usize) -> Self {
         Rover {
             components: None,
@@ -353,7 +448,7 @@ impl<C: Component> Rover<C> {
                 max_visible_rows: height,
                 // dimens,
             },
-            // renderer: Some(renderer),
+            // r: Some(r),
         }
     }
 
@@ -364,6 +459,7 @@ impl<C: Component> Rover<C> {
     fn render(&mut self, r: &mut impl Renderer) {
         let offset = self.ctx.offset;
         let max_rows = self.ctx.max_visible_rows;
+        let pivot = self.ctx.pivot;
 
         let components = self
             .components
@@ -371,10 +467,19 @@ impl<C: Component> Rover<C> {
             .unwrap()
             .iter()
             .skip(offset)
-            .take(max_rows);
+            .take(max_rows)
+            .enumerate()
+            .map(|(idx, c)| (pivot.map(|p| p == idx).unwrap_or_default(), c));
+
 
         r.render(components);
     }
+
+    // fn update_selection(&mut self) {
+    //     if let Some(pivot) = self.ctx.pivot {
+    //         _ = self.r.as_mut().map(|r| r.update_selection(pivot));
+    //     }
+    // }
 
     fn selected_ref(&self) -> Option<&C> {
         Some(self.components.as_ref()?.get(self.ctx.pivot?)?)
@@ -383,16 +488,16 @@ impl<C: Component> Rover<C> {
     fn selected_mut(&mut self) -> Option<&mut C> {
         Some(self.components.as_mut()?.get_mut(self.ctx.pivot?)?)
     }
-    
 
     fn set_selected(&mut self, idx: usize) {
         assert!((0..self.len() - 1).contains(&idx));
         self.ctx.pivot = Some(idx);
     }
 
-    // fn resize(&mut self, w: usize, h: usize) {
-    //     self.ctx.dimens.resize(w, h);
-    // }
+    fn resize(&mut self, w: usize, h: usize) {
+        // TODO: update height + ctx 
+        todo!();
+    }
 
     fn shift(&mut self, d: Direction) {
         let len = self.len();
@@ -411,6 +516,8 @@ impl<C: Component> Rover<C> {
                 *pivot %= len;
             }
         };
+
+        // self.update_selection();
     }
 
     pub fn len(&self) -> usize {
