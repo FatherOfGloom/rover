@@ -163,7 +163,9 @@ impl DirScraper {
 
         let mut v = vec![];
 
-        v.push(ListEntry::parent(path.parent().unwrap_or(path).to_path_buf()));
+        v.push(ListEntry::parent(
+            path.parent().unwrap_or(path).to_path_buf(),
+        ));
 
         for e in fs::read_dir(path).unwrap() {
             v.push(ListEntry::from_dir_entry(e.unwrap().path()).unwrap());
@@ -230,7 +232,7 @@ impl DirScraper {
     }
 
     fn execute_entry(&mut self) -> Result<(), String> {
-        let selected =  match self.rover.selected_ref() {
+        let selected = match self.rover.selected_ref() {
             Some(r) => r,
             None => return Ok(()),
         };
@@ -248,8 +250,7 @@ impl DirScraper {
                 opener::open(selected.display().to_string()).map_err(|e| {
                     format!("Error opening the file '{}': {}", selected.display(), e)
                 })?;
-            }
-            // ListEntryKind::Parent => todo!(),
+            } // ListEntryKind::Parent => todo!(),
         }
 
         Ok(())
@@ -291,7 +292,10 @@ impl ListEntry {
     }
 
     fn parent(dir_entry: PathBuf) -> Self {
-        Self { dir_entry, kind: ListEntryKind::Parent }
+        Self {
+            dir_entry,
+            kind: ListEntryKind::Parent,
+        }
     }
 
     fn kind(&self) -> ListEntryKind {
@@ -528,7 +532,11 @@ impl<C: Component> Rover<C> {
 
     fn set_selected(&mut self, idx: usize) {
         let range = 0..self.len();
-        assert!(range.contains(&idx), "{}", format!("idx: {} range: {:?}", idx, range));
+        assert!(
+            range.contains(&idx),
+            "{}",
+            format!("idx: {} range: {:?}", idx, range)
+        );
         self.ctx.pivot = Some(idx);
     }
 
