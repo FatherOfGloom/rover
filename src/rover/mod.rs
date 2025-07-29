@@ -1,6 +1,7 @@
 use core::fmt;
 use std::cell::RefCell;
 use std::cmp::min;
+use std::ffi::OsStr;
 use std::fs::{self, DirEntry};
 use std::io::{self, Stdout, StdoutLock, Write, stdout};
 use std::ops::Deref;
@@ -56,26 +57,24 @@ pub struct DirScraper {
 }
 
 impl DirScraper {
-    pub fn init(path: PathBuf) -> Self {
-        let (w, h) = terminal::size().unwrap();
+    pub fn init(path: PathBuf) -> io::Result<Self> {
+        let (w, h) = terminal::size()?;
         let dimens = Rect::new(0, 0, w as usize, h as usize);
 
         let mut rover = Rover::new(dimens.h);
 
-        let entries = Self::read_dir(&path)
-            .unwrap()
-            .into_iter()
-            .map(|e| ListEntry::from_dir_entry(e));
-        rover.reset(entries.collect());
+        let entries = Self::read_dir(&path);
+
+        rover.reset(entries.unwrap());
         rover.set_selected(0);
 
-        DirScraper {
+        Ok(DirScraper {
             current_path: Some(path),
             should_exit: false,
             rover: rover,
             mode: Mode::Flow,
             terminal_dimens: dimens,
-        }
+        })
     }
 
     pub fn run(&mut self, stdout: &mut StdoutLock) -> std::io::Result<()> {
@@ -150,7 +149,7 @@ impl DirScraper {
         Ok(())
     }
 
-    fn read_dir(path: &Path) -> Result<Vec<DirEntry>, String> {
+    fn read_dir(path: &Path) -> Result<Vec<ListEntry>, String> {
         if !path.exists() {
             return Err(format!("Given path doesn't exist: '{}'.", path.display()));
         }
@@ -162,9 +161,15 @@ impl DirScraper {
             ));
         }
 
-        let res = fs::read_dir(path).unwrap().map(|e| e.unwrap()).collect();
+        let mut v = vec![];
 
-        Ok(res)
+        v.push(ListEntry::parent(path.parent().unwrap_or(path).to_path_buf()));
+
+        for e in fs::read_dir(path).unwrap() {
+            v.push(ListEntry::from_dir_entry(e.unwrap().path()).unwrap());
+        }
+
+        Ok(v)
     }
 
     fn to_parent_entry(&mut self) -> Result<(), String> {
@@ -215,33 +220,36 @@ impl DirScraper {
             ));
         }
 
-        let entries = Self::read_dir(&selected_path)
-            .unwrap()
-            .into_iter()
-            .map(|e| ListEntry::from_dir_entry(e));
-        self.current_path = Some(selected_path.to_path_buf());
-        // self.pivot = 0;
+        let entries = Self::read_dir(&selected_path);
 
-        self.rover.reset(entries.collect());
+        self.current_path = Some(selected_path.to_path_buf());
+        self.rover.reset(entries?);
+        self.rover.set_selected(0);
 
         Ok(())
     }
 
     fn execute_entry(&mut self) -> Result<(), String> {
-        let selected_path = self.rover.selected_ref().unwrap().path();
+        let selected =  match self.rover.selected_ref() {
+            Some(r) => r,
+            None => return Ok(()),
+        };
 
-        if selected_path.is_dir() {
-            self.goto(&selected_path)?;
+        let kind = selected.kind();
+
+        // I surrender to borrowing rules by cloning this bitch
+        let selected = selected.to_path_buf();
+
+        match kind {
             // let prev_pivot = self.pivot;
             // self.push_undo_pivot(prev_pivot);
-        } else {
-            opener::open(selected_path.display().to_string()).map_err(|e| {
-                format!(
-                    "Error opening the file '{}': {}",
-                    selected_path.display(),
-                    e
-                )
-            })?;
+            ListEntryKind::Dir | ListEntryKind::Parent => self.goto(&selected)?,
+            ListEntryKind::File => {
+                opener::open(selected.display().to_string()).map_err(|e| {
+                    format!("Error opening the file '{}': {}", selected.display(), e)
+                })?;
+            }
+            // ListEntryKind::Parent => todo!(),
         }
 
         Ok(())
@@ -260,21 +268,39 @@ trait Component {
 }
 
 struct ListEntry {
-    dir_entry: DirEntry,
-    // pub is_selected: bool,
+    dir_entry: PathBuf,
+    kind: ListEntryKind,
+}
+
+#[derive(Clone, Copy)]
+enum ListEntryKind {
+    Dir,
+    File,
+    Parent,
 }
 
 impl ListEntry {
-    fn from_dir_entry(dir_entry: DirEntry) -> Self {
-        Self {
-            dir_entry,
-            // is_selected: false,
-        }
+    fn from_dir_entry(dir_entry: PathBuf) -> io::Result<Self> {
+        let kind = if dir_entry.is_dir() {
+            ListEntryKind::Dir
+        } else {
+            ListEntryKind::File
+        };
+
+        Ok(Self { dir_entry, kind })
+    }
+
+    fn parent(dir_entry: PathBuf) -> Self {
+        Self { dir_entry, kind: ListEntryKind::Parent }
+    }
+
+    fn kind(&self) -> ListEntryKind {
+        self.kind
     }
 }
 
 impl Deref for ListEntry {
-    type Target = DirEntry;
+    type Target = Path;
 
     fn deref(&self) -> &Self::Target {
         &self.dir_entry
@@ -286,22 +312,34 @@ impl Component for ListEntry {
         // let prefix = if self.is_selected { ">\t" } else { "\t" };
         // let target = format!("{}{}", prefix, self.dir_entry.file_name().to_str().unwrap());
         // w.write(target.as_bytes()).unwrap();
-        let binding = self.dir_entry.file_name();
-        let target = binding.to_str().unwrap().as_bytes();
+
+        // TODO: find a better solution when there is no file_name
+        // Probably this can happen with a disc name on windows
+        let binding = self.dir_entry.file_name().unwrap_or(OsStr::new("?"));
+        let mut buffer = binding.to_str().unwrap().as_bytes().to_vec();
+        let target = match self.kind() {
+            ListEntryKind::Dir => {
+                buffer.extend_from_slice(&b"/"[..]);
+                buffer.as_slice()
+            }
+            ListEntryKind::File => buffer.as_slice(),
+            ListEntryKind::Parent => &b"../"[..],
+        };
         w.write(target).unwrap();
     }
 }
 
 struct ListRenderer<'a, 'lock> {
-    // TODO: wrap stdout with something that implements Write
-    // stdout: &'a mut StdoutLock<'lock>,
     writer: ListWriter<'a, 'lock>,
     bounds: Rect,
 }
 
 impl<'a, 'lock> ListRenderer<'a, 'lock> {
     fn new(bounds: Rect, stdout: &'a mut StdoutLock<'lock>) -> Self {
-        Self { bounds, writer: ListWriter::new(stdout, bounds.w) }
+        Self {
+            bounds,
+            writer: ListWriter::new(stdout, bounds.w),
+        }
     }
 
     fn resize(&mut self, w: usize, h: usize) {
@@ -325,7 +363,7 @@ impl<'a, 'lock> ListWriter<'a, 'lock> {
         Self {
             lock,
             max_len,
-            is_selected: false, 
+            is_selected: false,
             line: 0,
         }
     }
@@ -336,7 +374,7 @@ impl<'a, 'lock> ListWriter<'a, 'lock> {
             .unwrap()
             .queue(MoveToNextLine(1))
             .unwrap();
-        
+
         self.line += 1;
     }
 
@@ -372,7 +410,7 @@ impl Write for ListWriter<'_, '_> {
     }
 }
 
-struct SelectionGuard<'a, 'lock>(&'a mut ListWriter<'a, 'lock>); 
+struct SelectionGuard<'a, 'lock>(&'a mut ListWriter<'a, 'lock>);
 
 impl<'a, 'lock> Deref for SelectionGuard<'a, 'lock> {
     type Target = ListWriter<'a, 'lock>;
@@ -437,7 +475,7 @@ where
 
 // impl<C: Component, R: Renderer> Rover<C, R> {
 impl<C: Component> Rover<C> {
-// impl<'a, C: Component, R: Renderer> Rover<'a, C, R> {
+    // impl<'a, C: Component, R: Renderer> Rover<'a, C, R> {
     // pub fn new(height: usize, r: &'a mut R) -> Self {
     pub fn new(height: usize) -> Self {
         Rover {
@@ -471,7 +509,6 @@ impl<C: Component> Rover<C> {
             .enumerate()
             .map(|(idx, c)| (pivot.map(|p| p == idx).unwrap_or_default(), c));
 
-
         r.render(components);
     }
 
@@ -490,12 +527,13 @@ impl<C: Component> Rover<C> {
     }
 
     fn set_selected(&mut self, idx: usize) {
-        assert!((0..self.len() - 1).contains(&idx));
+        let range = 0..self.len();
+        assert!(range.contains(&idx), "{}", format!("idx: {} range: {:?}", idx, range));
         self.ctx.pivot = Some(idx);
     }
 
     fn resize(&mut self, w: usize, h: usize) {
-        // TODO: update height + ctx 
+        // TODO: update height + ctx
         todo!();
     }
 
